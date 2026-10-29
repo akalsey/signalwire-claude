@@ -5,7 +5,7 @@ The Contexts and Steps system provides an alternative to traditional prompt-base
 ## Import
 
 ```python
-from signalwire_agents import AgentBase, ContextBuilder, Context, Step, create_simple_context
+from signalwire import AgentBase, ContextBuilder, Context, Step, create_simple_context
 ```
 
 ## When to Use Contexts and Steps
@@ -157,7 +157,7 @@ step.add_bullets("Requirements", [
 
 ### set_step_criteria()
 
-Define when this step is considered complete.
+Define when this step is considered complete. This guides the model. It is not a hard gate. Check anything that must be true in your code.
 
 ```python
 step.set_step_criteria("User provides and confirms their email address")
@@ -167,12 +167,14 @@ step.set_step_criteria("User provides and confirms their email address")
 
 Restrict which functions are available in this step.
 
+Set `functions` on every step. Pass `[]` (or `"none"`) when the step should have no tools. A step that omits the list keeps the previous step's tools.
+
 ```python
 # Specific functions only
 step.set_functions(["save_name", "validate_email"])
 
-# No functions
-step.set_functions("none")
+# No functions. Omitting this call keeps the previous step's tools.
+step.set_functions([])
 ```
 
 ### set_valid_steps()
@@ -326,7 +328,7 @@ The ContextBuilder enforces these rules:
 Create a simple context without an agent:
 
 ```python
-from signalwire_agents import create_simple_context
+from signalwire import create_simple_context
 
 context = create_simple_context("default")
 step = context.add_step("greet")
@@ -337,8 +339,8 @@ step.set_text("Greet the user.")
 
 ```python
 #!/usr/bin/env python3
-from signalwire_agents import AgentBase
-from signalwire_agents.core.function_result import SwaigFunctionResult
+from signalwire import AgentBase
+from signalwire import FunctionResult
 
 
 class AppointmentScheduler(AgentBase):
@@ -421,7 +423,7 @@ class AppointmentScheduler(AgentBase):
     )
     def set_appointment_type(self, args, raw_data):
         appt_type = args.get("type")
-        return SwaigFunctionResult(f"Appointment type set to: {appt_type}").add_action(
+        return FunctionResult(f"Appointment type set to: {appt_type}").add_action(
             "set_global_data", {"appointment_type": appt_type}
         )
 
@@ -437,7 +439,7 @@ class AppointmentScheduler(AgentBase):
         date = args.get("date")
         time = args.get("time")
         # In a real implementation, check against a calendar system
-        return SwaigFunctionResult(f"The slot on {date} at {time} is available.")
+        return FunctionResult(f"The slot on {date} at {time} is available.")
 
     @AgentBase.tool(
         name="book_appointment",
@@ -445,7 +447,7 @@ class AppointmentScheduler(AgentBase):
         parameters={}
     )
     def book_appointment(self, args, raw_data):
-        return SwaigFunctionResult("Appointment has been booked successfully.")
+        return FunctionResult("Appointment has been booked successfully.")
 
 
 if __name__ == "__main__":

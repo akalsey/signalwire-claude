@@ -53,8 +53,8 @@ SWAIG allows your AI agent to call server-side functions via HTTP POST.
 ### Pattern 1: SDK Tool Decorator
 
 ```python
-from signalwire_agents import AgentBase
-from signalwire_agents.core.function_result import SwaigFunctionResult
+from signalwire import AgentBase
+from signalwire import FunctionResult
 
 class MyAgent(AgentBase):
     @AgentBase.tool(
@@ -71,7 +71,7 @@ class MyAgent(AgentBase):
         """Check account balance"""
         account_number = args.get("account_number")
         # Database lookup...
-        return SwaigFunctionResult(f"Account {account_number} has a balance of $1,234.56")
+        return FunctionResult(f"Account {account_number} has a balance of $1,234.56")
 ```
 
 ### Pattern 2: SWML Function Metadata
@@ -164,20 +164,110 @@ if __name__ == '__main__':
     app.run(port=5000)
 ```
 
-## SwaigFunctionResult Actions
+## MCP Servers as Tool Providers
+
+An agent can import tools from Model Context Protocol servers. Tools are discovered at session start and registered as SWAIG functions, so the model sees **one unified tool list** — you do not have to choose between MCP and webhook functions.
+
+Docs: `/docs/swml/reference/calling/ai/swaig`
+
+```yaml
+SWAIG:
+  mcp_servers:
+    - url: https://mcp.example.com/tools
+      headers:
+        Authorization: "Bearer ${global_data.token}"
+      resources: true
+      resource_vars:
+        catalog: "resource://catalog"
+  functions:
+    - function: getWeather
+      purpose: look up weather
+      web_hook_url: https://myapp.com/swaig
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `mcp_servers[].url` | string, required | |
+| `mcp_servers[].headers` | object | **Auth tokens go here — there is no separate auth field.** Values support variable expansion. |
+| `mcp_servers[].resources` | boolean, default `false` | Fetch MCP resources in addition to tools |
+| `mcp_servers[].resource_vars` | object | Bind resources to variables |
+
+### The trap: `SWAIG` must be an object
+
+*(Not on the docs site.)* `mcp_servers` is only read when the `SWAIG` config block is an **object**. If `SWAIG` is given as a bare functions array, `mcp_servers` is silently ignored — no error, no log line you will see, the tools simply never appear.
+
+```yaml
+# ❌ mcp_servers has nowhere to live — silently dropped
+SWAIG:
+  - function: getWeather
+    web_hook_url: https://myapp.com/swaig
+
+# ✅
+SWAIG:
+  functions:
+    - function: getWeather
+      web_hook_url: https://myapp.com/swaig
+  mcp_servers:
+    - url: https://mcp.example.com/tools
+```
+
+If MCP tools are not showing up, check this first.
+
+### Discovery behavior
+
+Discovery happens **once per session, before the greeting**. A server that comes up later in the call is not picked up.
+
+If a server advertises neither `tools` nor `resources` in its capabilities handshake, it is skipped.
+
+SDK-side equivalent: `/docs/server-sdks/guides/mcp-gateway`.
+
+## SWAIG Includes — Remote Function Discovery
+
+Pull a function list from a remote URL at session start instead of declaring every function inline. Useful for sharing one tool catalog across several agents.
+
+Docs: `/docs/swml/reference/calling/ai/swaig/includes`
+
+```yaml
+SWAIG:
+  includes:
+    - url: https://myapp.com/swaig/catalog
+      functions: [lookup_order, cancel_order]
+      auth_user: user
+      auth_password: pass
+      meta_data:
+        tenant: acme
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `url` | string | yes | Where the remote functions are defined |
+| `functions` | string[] | yes | Names which functions to import |
+| `auth_user` | string | no | HTTP basic auth |
+| `auth_password` | string | no | HTTP basic auth |
+| `meta_data` | object | no | Key-value pairs passed through to the remote functions |
+
+**`functions` is required, and it is a filter you write, not a discovery wildcard.** During initialization SWAIG sends a signature request listing exactly these names to your `url`, and your server returns the matching definitions. A name you leave out is not imported; there is no "give me everything" form.
+
+**The signature request** always carries `action: "get_signature"` and `content_type: "text/swaig"`, plus optional `project_id`, `space_id` and your `meta_data`. Your endpoint may reply with an array of definitions, a single definition, or an object of `{functions, defaults}` — and should return definitions matching the shape of `SWAIG.functions` whether or not they were specifically asked for. SignalWire may sign this request with an `X-SignalWire-Signature` header. Payload reference: `/docs/apis/rest/webhooks/swaig-signature-request`.
+
+The fetch happens **when the SWML document loads**, before any interaction with the caller. If your catalog endpoint is slow or down, that cost lands on call setup.
+
+Compare with [`mcp_servers`](#mcp-servers-as-tool-providers): includes pull SWAIG function definitions from an endpoint you control and speak SWAIG's own signature protocol; MCP servers speak MCP and get translated. Both end up in the same unified tool list the model sees.
+
+## FunctionResult Actions
 
 Return SWML actions from functions to control the call:
 
 ### Basic Response
 
 ```python
-return SwaigFunctionResult("The weather in Seattle is sunny and 72°F")
+return FunctionResult("The weather in Seattle is sunny and 72°F")
 ```
 
 ### Response with Play Action
 
 ```python
-result = SwaigFunctionResult("Please hold while I transfer you")
+result = FunctionResult("Please hold while I transfer you")
 result.add_action("play", {"url": "https://example.com/hold-music.mp3"})
 return result
 ```
@@ -185,7 +275,7 @@ return result
 ### Response with Transfer
 
 ```python
-result = SwaigFunctionResult("Transferring you to sales now")
+result = FunctionResult("Transferring you to sales now")
 result.add_action("play", {"url": "say:Please hold"})
 result.add_action("transfer", {"dest": "tel:+15551234567"})
 return result
@@ -194,7 +284,7 @@ return result
 ### Chained Actions (Fluent API)
 
 ```python
-return (SwaigFunctionResult("Processing your payment")
+return (FunctionResult("Processing your payment")
     .add_action("play", {"url": "https://example.com/processing.mp3"})
     .add_action("hangup", {}))
 ```
@@ -287,7 +377,7 @@ class SupportAgent(AgentBase):
         # Store in session for later use
         self.session_data['open_tickets'] = ticket_numbers
 
-        return (SwaigFunctionResult(f"You have {len(tickets)} open tickets: {', '.join(ticket_numbers)}")
+        return (FunctionResult(f"You have {len(tickets)} open tickets: {', '.join(ticket_numbers)}")
             .add_action("set_meta_data", {"open_tickets": ticket_numbers}))
 
     @AgentBase.tool(
@@ -302,12 +392,12 @@ class SupportAgent(AgentBase):
 
         # Verify ticket exists in session
         if ticket_number not in self.session_data.get('open_tickets', []):
-            return SwaigFunctionResult("That ticket number doesn't exist or is already closed.")
+            return FunctionResult("That ticket number doesn't exist or is already closed.")
 
         # Close ticket
         database.close_ticket(ticket_number)
 
-        return SwaigFunctionResult(f"Ticket {ticket_number} has been closed.")
+        return FunctionResult(f"Ticket {ticket_number} has been closed.")
 ```
 
 **Use cases:**
@@ -349,7 +439,7 @@ def verify_customer(self, args, raw_data):
 
     if customer:
         # Store sensitive data in metadata (NOT visible to AI)
-        return (SwaigFunctionResult("Identity verified. How can I help you?")
+        return (FunctionResult("Identity verified. How can I help you?")
             .add_action("set_meta_data", {
                 "verified": True,
                 "customer_id": customer['id'],
@@ -357,7 +447,7 @@ def verify_customer(self, args, raw_data):
                 "customer_tier": customer['tier']
             }))
     else:
-        return SwaigFunctionResult("I couldn't verify your identity. Please try again.")
+        return FunctionResult("I couldn't verify your identity. Please try again.")
 
 @AgentBase.tool(
     name="get_balance",
@@ -369,11 +459,11 @@ def get_balance(self, args, raw_data):
     meta = raw_data.get('meta_data', {})
 
     if not meta.get('verified'):
-        return SwaigFunctionResult("Please verify your identity first.")
+        return FunctionResult("Please verify your identity first.")
 
     # Balance is in metadata, not passed through AI
     balance = meta.get('account_balance')
-    return SwaigFunctionResult(f"Your current balance is ${balance:.2f}")
+    return FunctionResult(f"Your current balance is ${balance:.2f}")
 ```
 
 ### Metadata Token for Scoped Access
@@ -395,14 +485,14 @@ For functions that don't need local processing, use DataMap to call external API
 ### Weather Lookup via API
 
 ```python
-from signalwire_agents.core.data_map import DataMap
+from signalwire import DataMap
 
 # Weather lookup via API
 weather_func = (DataMap("get_weather")
     .purpose("Get current weather for a city")
     .parameter("city", "string", "City name", required=True)
     .webhook("GET", "https://api.weather.com/v1/current?q=${args.city}&key=API_KEY")
-    .output(SwaigFunctionResult(
+    .output(FunctionResult(
         "The weather in ${args.city} is ${response.condition} "
         "and ${response.temp_f}°F"
     ))
@@ -423,7 +513,7 @@ playback_control = (DataMap("control_playback")
     .expression(
         "${args.command}",
         r"start.*",
-        SwaigFunctionResult("Starting playback").add_action(
+        FunctionResult("Starting playback").add_action(
             "playback_bg", {"file": "${args.filename}"}
         )
     )
@@ -431,7 +521,7 @@ playback_control = (DataMap("control_playback")
     .expression(
         "${args.command}",
         r"stop.*",
-        SwaigFunctionResult("Stopping playback").add_action(
+        FunctionResult("Stopping playback").add_action(
             "stop_playback_bg", {}
         )
     )
@@ -461,7 +551,7 @@ def book_appointment(self, args, raw_data):
     appointment_id = database.create_appointment(date, time)
 
     # Return response and enable confirmation function
-    return (SwaigFunctionResult(f"I've reserved {date} at {time} for you.")
+    return (FunctionResult(f"I've reserved {date} at {time} for you.")
         .add_action("set_meta_data", {"appointment_id": appointment_id})
         .add_action("toggle_functions", {
             "active": True,
@@ -480,7 +570,7 @@ def confirm_appointment(self, args, raw_data):
     database.confirm_appointment(appointment_id)
 
     # Disable both functions after confirmation
-    return (SwaigFunctionResult("Your appointment is confirmed. You'll receive a reminder 24 hours before.")
+    return (FunctionResult("Your appointment is confirmed. You'll receive a reminder 24 hours before.")
         .add_action("toggle_functions", {
             "active": False,
             "functions": ["confirm_appointment", "cancel_appointment"]
@@ -510,7 +600,7 @@ def send_verification_code(self, args, raw_data):
     self.session_data['code_expiry'] = time.time() + 300  # 5 minutes
 
     # Disable this function, enable verify function
-    return (SwaigFunctionResult("I've sent a verification code to your phone.")
+    return (FunctionResult("I've sent a verification code to your phone.")
         .add_action("toggle_functions", {
             "active": False,
             "functions": ["send_verification_code"]
@@ -534,18 +624,18 @@ def verify_code(self, args, raw_data):
 
     # Check expiration
     if time.time() > expiry:
-        return SwaigFunctionResult("The code has expired. Please request a new one.")
+        return FunctionResult("The code has expired. Please request a new one.")
 
     # Verify code
     if provided_code == stored_code:
-        return (SwaigFunctionResult("Verification successful.")
+        return (FunctionResult("Verification successful.")
             .add_action("set_meta_data", {"verified": True})
             .add_action("toggle_functions", {
                 "active": False,
                 "functions": ["verify_code"]
             }))
     else:
-        return SwaigFunctionResult("That code is incorrect. Please try again.")
+        return FunctionResult("That code is incorrect. Please try again.")
 ```
 
 **Best Practices:**
@@ -592,7 +682,7 @@ def transfer_to_human(self, args, raw_data):
     crm.send_screen_pop(number, context)
 
     # Return SWML action to transfer
-    return (SwaigFunctionResult(f"Transferring you to {department or 'a representative'}")
+    return (FunctionResult(f"Transferring you to {department or 'a representative'}")
         .add_action("play", {"url": f"say:Please hold while I transfer you to {department or 'our team'}"})
         .add_action("transfer", {"dest": f"tel:{number}"}))
 ```
@@ -634,12 +724,12 @@ class OrderAgent(AgentBase):
 
         if result:
             status, shipped_date, delivery_date = result
-            return SwaigFunctionResult(
+            return FunctionResult(
                 f"Order {order_number} is {status}. "
                 f"It shipped on {shipped_date} and will arrive by {delivery_date}."
             )
         else:
-            return SwaigFunctionResult(
+            return FunctionResult(
                 f"I couldn't find order {order_number}. Could you double-check the order number?"
             )
 ```
@@ -671,16 +761,16 @@ def get_stock_price(self, args, raw_data):
             price = data['price']
             change = data['change']
 
-            return SwaigFunctionResult(
+            return FunctionResult(
                 f"{symbol} is trading at ${price:.2f}, "
                 f"{'up' if change > 0 else 'down'} ${abs(change):.2f} today."
             )
         else:
-            return SwaigFunctionResult(f"I couldn't find stock information for {symbol}.")
+            return FunctionResult(f"I couldn't find stock information for {symbol}.")
 
     except Exception as e:
         logging.error(f"Stock API error: {e}")
-        return SwaigFunctionResult("I'm having trouble accessing stock prices right now.")
+        return FunctionResult("I'm having trouble accessing stock prices right now.")
 ```
 
 ### Pattern 5: Error Handling
@@ -700,16 +790,16 @@ def lookup_order(self, args, raw_data):
         order = self.database.get_order(order_number)
 
         if order:
-            return SwaigFunctionResult(f"Order {order_number} is {order.status}")
+            return FunctionResult(f"Order {order_number} is {order.status}")
         else:
-            return SwaigFunctionResult(
+            return FunctionResult(
                 f"I couldn't find order {order_number}. Could you double-check the order number?"
             )
 
     except Exception as e:
         # Log error but don't expose to user
         logging.error(f"Order lookup error: {e}")
-        return SwaigFunctionResult(
+        return FunctionResult(
             "I'm having trouble accessing the order system. "
             "Let me transfer you to someone who can help."
         )
@@ -791,12 +881,12 @@ functions:
         - url: "https://api.signalwire.com/api/datasphere/search"
           method: POST
           headers:
-            Authorization: "Basic {{base64_encoded_creds}}"
+            Authorization: "Basic <base64-encoded-credentials>"
           body:
-            query: "{{args.question}}"
+            query: "%{args.question}"
             document_id: "your-document-id"
           output:
-            response: "{{chunk.text}}"
+            response: "%{chunks[0].text}"
 ```
 
 **Use Cases:**

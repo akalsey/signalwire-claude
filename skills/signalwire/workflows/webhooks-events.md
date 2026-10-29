@@ -293,7 +293,7 @@ def generate_vip_swml(from_number):
         "sections": {
             "main": [
                 {"answer": {}},
-                {"say": {"text": f"Welcome back, valued customer {from_number}"}},
+                {"play": {"url": f"say: Welcome back, valued customer {from_number}"}},
                 {"connect": {"to": "+15551111111"}}  # VIP queue
             ]
         }
@@ -305,12 +305,12 @@ def generate_standard_swml(from_number):
         "sections": {
             "main": [
                 {"answer": {}},
-                {"say": {"text": "Welcome to our service"}},
+                {"play": {"url": "say: Welcome to our service"}},
                 {"transfer": {"dest": "main_menu"}}
             ],
             "main_menu": [
                 {"prompt": {
-                    "say": "Press 1 for sales, 2 for support",
+                    "play": "say: Press 1 for sales, 2 for support",
                     "max_digits": 1
                 }}
             ]
@@ -385,6 +385,25 @@ def handle_recording_ready():
 ## Webhook Security
 
 ### Verify Webhook Source
+
+#### Option 0: Request signatures (preferred where available)
+
+Every POST SignalWire makes to **fetch a SWML document** from a URL you control is signed. That is the real mechanism — reach for it before IP allowlists or shared secrets.
+
+```
+signature = hex( HMAC( signing_key, url + raw_body ) )
+```
+
+| Header | Algorithm | Present on |
+|--------|-----------|------------|
+| `X-Signalwire-Signature` | HMAC-SHA1, hex | Every signed request |
+| `X-Signalwire-SHA256-Signature` | HMAC-SHA256, hex | Call requests only |
+
+Messaging document requests carry the SHA-1 header only.
+
+**Not every request is signed.** See [Request Signing](ai-agent-security.md#request-signing) in the security workflow for what is covered, what is not, and the three mistakes that make a valid signature look invalid.
+
+Docs: `/docs/swml/guides/webhook-security`.
 
 #### Option 1: IP Allowlist
 
@@ -830,7 +849,11 @@ def create_ticket():
 sections:
   main:
     - live_transcribe:
-        url: "wss://yourserver.com/transcribe"
+        action:
+          start:
+            webhook: "https://yourserver.com/transcribe"
+            lang: en
+            live_events: true
     - ai:
         prompt: "Your agent instructions"
 ```
@@ -875,11 +898,55 @@ Stream call audio for real-time transcription or recording:
 ```yaml
 # SWML with audio streaming
 - stream:
-    url: "wss://yourserver.com/stream"
-    track: "both"  # inbound, outbound, or both
+    url: "wss://yourserver.com/stream"   # must be wss://
+    track: "both_tracks"  # inbound_track, outbound_track, or both_tracks
+    status_url: "https://yourserver.com/stream-status"
 - ai:
-    prompt: "Your instructions"
+    prompt:
+      text: "Your instructions"
 ```
+
+`stream` is one-way. For bidirectional audio use `connect: {to: "stream:wss://..."}` with `realtime: true` — see [swml-methods.md](swml-methods.md#stream--stop_stream).
+
+#### Stream Status Callback
+
+Your `status_url` receives lifecycle events. Docs: `/docs/apis/rest/webhooks/stream-status-callback`.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `event_type` | enum | Always `calling.call.stream` |
+| `event_channel` | string | |
+| `timestamp` | double | Unix seconds |
+| `project_id` / `space_id` | string | |
+| `params.call_id` | string | |
+| `params.node_id` | string | |
+| `params.segment_id` | string | |
+| `params.control_id` | string | Matches the `control_id` you set on `stream` |
+| `params.state` | enum | `streaming` or `finished` |
+| `params.url` | string | The `wss://` endpoint |
+| `params.tag` | string | Optional |
+| `params.name` | string | Optional |
+
+Two states only — `streaming` on start, `finished` on end. Match them on `params.control_id`, which is how you tell concurrent streams apart.
+
+### AI Sidecar Callbacks
+
+An `ai_sidecar` streams agent-facing advice events to your application. Two delivery paths carry the same payload: the Relay topic `calling.ai.sidecar`, which always fires, and an HTTP webhook, which only fires when you set `url`.
+
+Payload reference: `/docs/apis/rest/webhooks/ai-sidecar-callback`. Tool webhooks are separate: `/docs/apis/rest/webhooks/ai-sidecar-swaig-tool-webhook`.
+
+The envelope has two levels — unwrap `sidecar_event` before reading `type`:
+
+| Field | Contains |
+|-------|----------|
+| `call_info` | `call_id`, `content_type`, `content_disposition`, `conversation_type`, and optionally `project_id` / `space_id` |
+| `sidecar_event` | The event itself: `type`, `ts`, `tick_id`, `channel_data` |
+
+Sixteen event types: `start`, `turn`, `request`, `thought`, `insight`, `skip`, `tool_call`, `tool_result`, `action`, `global_data_change`, `history_pruned`, `error`, `ask_request`, `ask_answer`, `stop`, `final`.
+
+Because everything publishes on the Relay channel in real time, **the webhook is optional** — a browser or server consuming Relay events needs no `url` at all.
+
+Full field breakdown per event type, plus stop and error reasons: [AI Sidecar](ai-sidecar.md#callbacks).
 
 ### WebSocket Stream Handler
 

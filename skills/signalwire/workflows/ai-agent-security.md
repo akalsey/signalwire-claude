@@ -2,6 +2,113 @@
 
 Best practices for securing SignalWire AI Agents.
 
+## Request Signing
+
+Verifying that SignalWire, and not someone else, sent you a request. This is the mechanism — the metadata and basic-auth patterns further down this file are complements to it, not substitutes.
+
+Docs: `/docs/swml/guides/webhook-security`
+
+*(Not to be confused with `/docs/apis/rest/webhooks/swaig-signature-request`, which is about SWAIG's `get_signature` function-discovery call — a different meaning of "signature" entirely. See [SWAIG Includes](ai-agent-functions.md#swaig-includes--remote-function-discovery).)*
+
+### The mechanics
+
+```
+signature = hex( HMAC( signing_key, url + raw_body ) )
+```
+
+The `url` is the full path including query string. For call requests, basic auth credentials are stripped before signing; for messaging requests they are included as configured.
+
+| Header | Algorithm | Present on |
+|--------|-----------|------------|
+| `X-Signalwire-Signature` | HMAC-SHA1, hex | Every signed request |
+| `X-Signalwire-SHA256-Signature` | HMAC-SHA256, hex | Call requests only |
+
+Messaging document requests carry the SHA-1 header only.
+
+### What is signed, and what is not
+
+**Signed:** every POST SignalWire makes to fetch a SWML document from a URL you control — the initial fetch, and `execute` or `transfer` operations pointing at external URLs, on both the call and messaging sides.
+
+**Not signed:**
+
+| Request | Protect it with |
+|---------|-----------------|
+| POST to a SWAIG function's `web_hook_url` | HTTP basic auth in the URL, or a shared secret in a custom `X-` header |
+| The conversation summary sent to `post_prompt_url` (when you serve your own SWML) | Same |
+| The `request` method during a call | Same |
+
+The messaging counterpart of `request` *does* carry the SHA-1 header. The calling one does not.
+
+### Three things builders get wrong
+
+**1. Hash the exact public-facing URL you configured in the Dashboard.** A proxy that rewrites host or scheme changes the hashed string, and a perfectly valid signature then fails to verify. The docs' own troubleshooting section leads with this, because it is the most common cause.
+
+**2. Keep the raw body.** Verification hashes the bytes, not a re-serialized JSON object. Round-tripping through a JSON parser reorders keys and changes whitespace, and the hash no longer matches. In Express, capture `req.rawBody` *before* the JSON body parser consumes it:
+
+```js
+app.use(express.json({
+  verify: (req, res, buf) => { req.rawBody = buf.toString('utf8'); }
+}));
+```
+
+**3. Do not require a signature on every inbound request.** Signatures cover requests *for a SWML document*, not everything a document sends you. An endpoint that rejects unsigned traffic will reject SWAIG function webhooks, `status_url` callbacks, and `request` verb targets — traffic you meant to accept. Gate on signature only where a signature is actually sent.
+
+The docs carry working verification snippets in Node, Python, and Ruby, plus a "confirm your endpoint rejects forgeries" test. Adapt those rather than writing your own HMAC comparison — and use a constant-time compare.
+
+### Getting and rotating the signing key
+
+Dashboard: **API Credentials → Signing Key → Show**. Each project has its own key.
+
+Rotate via the Dashboard reset button, or the API:
+
+```
+POST https://{space}.signalwire.com/api/projects/{id}/signing-key/rotate
+```
+
+Docs: `/docs/apis/rest/projects/rotate-signing-key`. **The previous key takes about 1–2 minutes to stop working**, so rotation has a short overlap window rather than being instantaneous — deploy the new key within it, and expect a brief period where both verify.
+
+## Content Redaction
+
+Three related params in `ai.params`. Docs: `/docs/swml/reference/calling/ai/params` and `/docs/platform/ai/content-redaction`.
+
+| Param | Type | Default | What it does |
+|-------|------|---------|--------------|
+| `redact_prompt` | **string** | — | A plain-language description of sensitive content to redact from what the platform records and transmits |
+| `auto_correct` | boolean | `false` | Cleans up the caller's transcription before the AI reads it — spoken numbers to digits, address and phone formatting, obvious mishearings — without changing meaning |
+| `enable_text_normalization` | **string** | `both` | Converts numbers, currency and dates between written and spoken forms, so the AI understands callers better and speaks more naturally |
+
+**`redact_prompt` is a string, not a switch.** You describe what to redact in plain language — "credit card numbers, CVVs, social security numbers" — and the platform masks matching text with `----`.
+
+```yaml
+- ai:
+    prompt:
+      text: "You are a payments assistant."
+    params:
+      redact_prompt: "credit card numbers, CVV codes, and social security numbers"
+      auto_correct: true
+      utility_model: gpt-4.1-mini
+```
+
+Both `redact_prompt` and `auto_correct` run on the [`utility_model`](voice-ai.md#utility_model), not the main model.
+
+### What redaction does *not* cover
+
+The name suggests more protection than it gives. **Redaction is applied to the record, not to the call.**
+
+| Masked | Not masked |
+|--------|------------|
+| Conversation text in completed-turn AI events | The live conversation — both parties hear the real content |
+| Webhook payloads | The model's input — the agent processes real words each turn |
+| Post-conversation call logs (`call_log`, `raw_call_log`) | Structured fields: entity values, tool results |
+| The call timeline | SWAIG handler arguments — your functions receive unmasked data |
+| | Audio recordings |
+
+The docs are explicit that this is best-effort and AI-driven, that values can slip through, and that it is "a strong safeguard for your logs and integrations rather than a guarantee."
+
+**So do not use `redact_prompt` as your only control on a card number.** It keeps secrets out of your log pipeline and your webhook payloads. It does not keep them out of the model, out of your SWAIG endpoint, or off the recording. For payment data that must never reach the LLM, use the [`pay`](swml-methods.md#pay) method, which bypasses the model entirely.
+
+Caller content is also redacted from logs at visible log levels.
+
 ## Authentication
 
 ### Basic Auth for Agent Endpoints
@@ -75,14 +182,14 @@ class BankingAgent(AgentBase):
         # Implement rate limiting
         attempts = raw_data.get("vars", {}).get("pin_attempts", 0)
         if attempts >= 3:
-            return (SwaigFunctionResult(
+            return (FunctionResult(
                 "Too many incorrect attempts. For your security, "
                 "I'll connect you with a representative."
             )
             .add_action("transfer", {"dest": "sip:security@company.com"}))
 
         if self.validate_pin(caller, pin):
-            return (SwaigFunctionResult(
+            return (FunctionResult(
                 "Identity verified. How can I help you today?"
             )
             .add_action("set_global_data", {"verified": True})
@@ -90,7 +197,7 @@ class BankingAgent(AgentBase):
                 "active": ["get_balance", "transfer_funds"]
             }))
         else:
-            return (SwaigFunctionResult(
+            return (FunctionResult(
                 f"That PIN doesn't match. You have {2 - attempts} attempts left."
             )
             .add_action("set_global_data", {"pin_attempts": attempts + 1}))
@@ -103,7 +210,7 @@ class BankingAgent(AgentBase):
     def get_balance(self, args, raw_data):
         # Double-check verification status
         if not raw_data.get("vars", {}).get("verified"):
-            return SwaigFunctionResult(
+            return FunctionResult(
                 "I need to verify your identity first. What's your PIN?"
             )
         # Return balance...
@@ -129,14 +236,14 @@ def verify_identity(self, args, raw_data):
 
     customer = self.lookup_customer(caller)
     if not customer:
-        return SwaigFunctionResult(
+        return FunctionResult(
             "I couldn't find an account with this phone number. "
             "Would you like me to transfer you to customer service?"
         )
 
     if (customer["ssn_last4"] == ssn_last4 and
         customer["zip"] == zip_code):
-        return (SwaigFunctionResult(
+        return (FunctionResult(
             f"Thank you, {customer['name']}. How can I help you?"
         )
         .add_action("set_global_data", {
@@ -144,7 +251,7 @@ def verify_identity(self, args, raw_data):
             "customer_id": customer["id"]
         }))
     else:
-        return SwaigFunctionResult(
+        return FunctionResult(
             "That information doesn't match our records. "
             "Let me connect you with a representative."
         ).add_action("transfer", {"dest": "sip:verify@company.com"})
@@ -171,7 +278,7 @@ def lookup_order(self, args, raw_data):
 
     # Validate format (e.g., ORD-12345)
     if not re.match(r'^ORD-\d{5,10}$', order_number):
-        return SwaigFunctionResult(
+        return FunctionResult(
             "That doesn't look like a valid order number. "
             "Order numbers start with ORD- followed by digits."
         )
@@ -217,7 +324,7 @@ def send_confirmation(self, args, raw_data):
     phone = args.get("phone", "")
 
     if not is_valid_phone(phone):
-        return SwaigFunctionResult(
+        return FunctionResult(
             "I need a valid US phone number to send the confirmation."
         )
 
@@ -227,47 +334,67 @@ def send_confirmation(self, args, raw_data):
 
 ## Data Protection
 
-### Never Log Sensitive Data
+### Collect Cards Outside the Model
+
+The model decides it is time to pay. It never hears the card. Tell the prompt not to ask for card details, and to stop a caller who starts reading a number out loud and send them to the keypad. Your pricing handler computes the amount and stores it with `FunctionResult.set_metadata()`. The payment function reads that amount from `raw_data["meta_data"]`. It does not take `card_number` or `amount` from the model.
+
+Metadata is scoped to a function's `meta_data_token`, so give the pricing and payment functions the same token; otherwise the payment function sees an empty `meta_data`.
+
+`post_process=True` speaks the handoff line first. `.pay()` then runs SWML `pay`. When it finishes, the agent reads `ai_response`, fills in `${pay_result}`, and replies. Running SWML from a function is allowed by default; if `swaig_allow_swml` is off, the `pay` step is skipped.
 
 ```python
-import logging
-
-logger = logging.getLogger(__name__)
-
 @AgentBase.tool(
-    name="process_payment",
-    description="Process a payment",
-    parameters={
-        "card_number": {"type": "string", "description": "Card number"},
-        "amount": {"type": "number", "description": "Amount"}
-    }
+    name="collect_payment",
+    description="Hand the call to keypad card entry. Do not collect card numbers.",
+    parameters={},
+    meta_data_token="order",
 )
-def process_payment(self, args, raw_data):
-    card_number = args.get("card_number")
-    amount = args.get("amount")
+def collect_payment(self, args, raw_data):
+    meta = raw_data.get("meta_data") or {}
+    total = meta.get("order_total")
+    if total is None:
+        return FunctionResult("Let's finish the order before we take payment.")
 
-    # WRONG - logs sensitive data
-    # logger.info(f"Processing payment: card={card_number}, amount={amount}")
-
-    # CORRECT - mask sensitive data
-    masked_card = f"****{card_number[-4:]}" if card_number else "unknown"
-    logger.info(f"Processing payment: card={masked_card}, amount={amount}")
-
-    # Process payment...
+    return FunctionResult(
+        "You'll enter your card details using your phone's keypad.",
+        post_process=True,
+    ).pay(
+        payment_connector_url="https://payments.example.com/connector",
+        charge_amount=f"{float(total):.2f}",
+        description=f"Order {meta.get('order_id')}",
+        max_attempts=2,
+        security_code=True,
+        postal_code=True,
+        token_type="one-time",
+        ai_response=(
+            "The payment status is ${pay_result}. "
+            "If it is success, confirm the order and give a delivery estimate. "
+            "If not, apologize and offer to try again or pay another way. "
+            "Do not discuss card details."
+        ),
+    )
 ```
+
+If you write the SWML `pay` by hand instead, `security_code` and `postal_code` must be strings (`"true"`); JSON booleans are rejected.
+
+Never put `${pay_payment_results}` in `ai_response`, a post-call summary, or a later function. The card number and CVV are masked there. The expiry and postal code are not, and the object stays on the call until it ends. `${pay_result}` is the status, which is all the model needs.
+
+The same goes for your own logs: never log card numbers, CVVs, or other sensitive caller data. Mask anything you must record.
 
 ### Secure Global Data
 
-Don't store sensitive info in global_data (it's visible in logs):
+Don't store sensitive info in global_data (it's visible in logs).
+
+Two tools in one turn start from the same `global_data` snapshot, taken at the start of the turn. The second write can overwrite the first. Keep anything both tools might update in your own store, keyed by `call_id`.
 
 ```python
 # WRONG - sensitive data in global_data
-return SwaigFunctionResult("Verified!").add_action(
+return FunctionResult("Verified!").add_action(
     "set_global_data", {"ssn": "123-45-6789"}
 )
 
 # CORRECT - only store non-sensitive identifiers
-return SwaigFunctionResult("Verified!").add_action(
+return FunctionResult("Verified!").add_action(
     "set_global_data", {"verified": True, "customer_id": "cust_abc123"}
 )
 ```
@@ -351,7 +478,7 @@ class RateLimitedAgent(AgentBase):
         caller = raw_data.get("call", {}).get("from", "unknown")
 
         if not self._check_rate_limit(caller):
-            return SwaigFunctionResult(
+            return FunctionResult(
                 "You've made too many requests. "
                 "Please wait a minute and try again."
             )
@@ -387,11 +514,11 @@ def transfer(self, args, raw_data):
     # Only allow predefined destinations
     dest = ALLOWED_DESTINATIONS.get(department)
     if not dest:
-        return SwaigFunctionResult(
+        return FunctionResult(
             "I can only transfer to support, sales, or billing."
         )
 
-    return SwaigFunctionResult(
+    return FunctionResult(
         f"Transferring you to {department}..."
     ).add_action("transfer", {"dest": dest})
 ```
@@ -407,4 +534,5 @@ def transfer(self, args, raw_data):
 - [ ] **Transfers**: Only allowed destinations
 - [ ] **HTTPS**: Production uses SSL/TLS
 - [ ] **Secure Functions**: Destructive operations marked secure
-- [ ] **Data Protection**: Minimal data in global_data
+- [ ] **Data Protection**: Minimal data in global_data. Two tools in one turn can overwrite each other's writes
+- [ ] **Cards**: Collected with `pay` on the keypad. The model receives `${pay_result}` only

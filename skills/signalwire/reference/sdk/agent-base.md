@@ -5,7 +5,7 @@ Complete reference for the `AgentBase` class - the foundation for all SignalWire
 ## Import
 
 ```python
-from signalwire_agents import AgentBase
+from signalwire import AgentBase
 ```
 
 ## Class Definition
@@ -165,7 +165,7 @@ def define_tool(
 **Parameters:**
 - `name` - Function identifier
 - `description` - Description for AI to understand when to call
-- `handler` - Callable with signature `(args, raw_data) -> SwaigFunctionResult`
+- `handler` - Callable with signature `(args, raw_data) -> FunctionResult`
 - `parameters` - JSON Schema for function parameters
 - `secure` - Require token validation
 - `fillers` - Phrases to say while processing
@@ -221,7 +221,7 @@ Declarative function definition.
 )
 def transfer_call(self, args, raw_data):
     dept = args.get("department")
-    return SwaigFunctionResult(f"Transferring to {dept}").add_action(
+    return FunctionResult(f"Transferring to {dept}").add_action(
         "transfer", {"dest": f"sip:{dept}@company.com"}
     )
 ```
@@ -353,7 +353,8 @@ def set_params(self, params: dict) -> 'AgentBase'
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `end_of_speech_timeout` | int | 3000 | ms of silence to end turn |
+| `end_of_speech_timeout` | int | 700 | ms of audio silence to end turn — see [turn taking](../../workflows/ai-agent-turn-taking.md) |
+| `turn_detection` | str | `both` | `both`, `punct_only`, `acoustic_only`, `off`. Alias: `enable_turn_detection` |
 | `attention_timeout` | int | 10000 | ms before attention prompt |
 | `inactivity_timeout` | int | 600000 | ms before disconnect |
 | `barge_match_string` | str | None | Regex for interruption triggers |
@@ -597,8 +598,8 @@ class MyAgent(AgentBase):
 
 ```python
 #!/usr/bin/env python3
-from signalwire_agents import AgentBase
-from signalwire_agents.core.function_result import SwaigFunctionResult
+from signalwire import AgentBase
+from signalwire import FunctionResult
 
 
 class CustomerServiceAgent(AgentBase):
@@ -672,7 +673,7 @@ class CustomerServiceAgent(AgentBase):
     def lookup_order(self, args, raw_data):
         order_num = args.get("order_number")
         # In real implementation, query database
-        return SwaigFunctionResult(
+        return FunctionResult(
             f"Order {order_num} was shipped on Monday and should arrive by Friday."
         )
 
@@ -682,7 +683,7 @@ class CustomerServiceAgent(AgentBase):
         parameters={}
     )
     def transfer_to_human(self, args, raw_data):
-        return (SwaigFunctionResult("I'll transfer you to a support specialist.")
+        return (FunctionResult("I'll transfer you to a support specialist.")
                 .add_action("transfer", {"dest": "sip:support@acme.com"}))
 
     def on_summary(self, summary=None, raw_data=None):

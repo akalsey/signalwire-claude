@@ -19,6 +19,7 @@ Build conversational AI agents for phone calls using SignalWire's AI platform. T
 
 **Looking for specific topics:**
 - [SWAIG Functions](#swaig-signalwire-ai-gateway) - Add server-side functions to SWML AI
+- [AI Billing & Metering](#ai-billing--metering) - How AI runtime is charged, cost guardrails
 - [When to Pull Additional Documentation](#when-to-pull-additional-documentation) - Reference guide
 
 ## AI Architecture Options
@@ -53,6 +54,21 @@ Full Python SDK for building stateful, complex AI agents. Best for:
 
 **→ Go to [AI Agent SDK Basics](ai-agent-sdk-basics.md)**
 
+### 4. AI Sidecar (Observer/Coach)
+
+Real-time AI observer that watches a live call and coaches a human agent via callbacks — it never speaks on the call. Best for:
+- Live sales coaching and compliance flagging
+- Intent-based UI navigation for agent desktops
+- Supervisor-on-shoulder workflows
+
+**→ Go to [AI Sidecar](ai-sidecar.md)**
+
+### Reaching an agent by text
+
+The same agent definition can be chatted with over text instead of voice, via a JSON-RPC endpoint. Billing is per turn rather than per minute.
+
+**→ Go to [AI Agent Chat](ai-agent-chat.md)**
+
 ### Quick Decision Tree
 
 ```
@@ -60,6 +76,7 @@ Need database/API access? → Use SWAIG or SDK
 Need complex state management? → Use SDK
 Need multi-agent architecture? → Use SDK
 Need serverless deployment? → Use SDK
+AI coaching a HUMAN agent (not talking to caller)? → Use ai_sidecar
 Want simplest approach? → Use SWML AI
 ```
 
@@ -87,8 +104,56 @@ sections:
 - **post_prompt_url**: SWAIG endpoint for function calls (optional)
 - **post_prompt_auth_user/password**: HTTP Basic Auth for SWAIG (optional)
 - **language**: Voice language (default: `en-US`)
-- **voice**: Voice gender or specific voice name
+- **voice**: Voice spec — see [Voice Selection](#voice-selection) below
 - **temperature**: Creativity level 0.0-1.0 (default: 0.7)
+
+### Voice Selection
+
+**Always declare the engine explicitly.** Voice specs take the form `engine.voice:model` — for example `elevenlabs.mark:eleven_turbo_v2_5`. The engine part is what keeps your agent's voice stable.
+
+**The default changed twice in two months:**
+
+| Date | Change |
+|------|--------|
+| 2026-08-13 | A voice string with no engine prefix resolves against `elevenlabs` instead of `gcloud`. So a bare `"en-US-Neural2-F"` no longer reaches Google. |
+| 2026-09-05 | An agent that specifies no `voice` at all now speaks with ElevenLabs "Mark". Mark is **included in the regular AI agent price** — not a premium add-on. |
+
+The compiled defaults are now engine `elevenlabs`, voice `mark`.
+
+That history is the argument for being explicit: an application relying on the default changes voice without a deploy. Sources: `/docs/platform/changelog/2026/8/13` and `/docs/platform/changelog/2026/9/5`.
+
+**This is the AI agent default only.** The `play` and `prompt` verbs resolve voices through a separate mapping table and land on a different default. Any "what is the default voice" answer has to say which surface it means.
+
+Set a voice via `voice` strings in SWML (`/docs/swml/reference/calling/ai/languages#use-voice-strings`) or `add_language()` in the SDKs (`/docs/server-sdks/guides/voice-language`). Audition voices at `/docs/platform/voice/tts`.
+
+### utility_model
+
+One parameter that changes the cost and latency profile of several background features at once.
+
+`params.utility_model` names the model used for lightweight background work. **Defaults to whatever `ai_model` is set to** — so an agent on a large frontier model is running its background chores on that model too, while the caller waits.
+
+Documented uses: redaction (`redact_prompt`) and transcription cleanup (`auto_correct`).
+
+It also covers double-turn planning, tool-result distillation, and summarization. *(Those three are not on the docs site.)*
+
+```yaml
+- ai:
+    prompt:
+      text: "You are a support agent."
+    params:
+      ai_model: gpt-4.1
+      utility_model: gpt-4.1-mini    # background work runs here instead
+```
+
+The docs recommend a small fast model — `gpt-4o-mini`, `gpt-4.1-mini`, or `gpt-4.1-nano` — because these tasks run on the caller's clock.
+
+**A typo here is invisible.** An unrecognized model name is silently ignored and the main model is used instead. No error is raised, nothing appears in your logs, and the only symptom is that the latency win you expected never materializes. Copy the model name; do not type it from memory.
+
+### Turn Taking
+
+When the agent decides you have stopped speaking is controlled by `params.turn_detection` and `params.end_of_speech_timeout`. Turn detection is **on by default** (`both`), fusing sentence punctuation with an acoustic model.
+
+If the agent interrupts callers or leaves dead air, that is the knob — see [Turn Taking](ai-agent-turn-taking.md). The published docs describe an older behavior, so start there rather than at `/docs/swml/reference/calling/ai/params`.
 
 ### Multi-Language Support
 
@@ -107,6 +172,69 @@ Add multiple languages for automatic detection:
 ```
 
 The AI automatically detects and responds in the caller's language.
+
+### Multilingual — switching language mid-call
+
+`languages` configures a **fixed set**. `multilingual` (shipped 2026-08-19) continuously detects the other party's language and switches TTS voice and language when it changes.
+
+**They are mutually exclusive.** Per the docs: *"`multilingual` and `languages` are mutually exclusive. If both are set, SignalWire uses `multilingual` and ignores `languages` entirely."* Setting both does not merge them and does not error — `languages` is simply dropped. This is the first thing people get wrong.
+
+Docs: `/docs/swml/reference/calling/ai/multilingual`
+
+```yaml
+ai:
+  multilingual:
+    start_language: en
+    allowed: [en, es, fr]
+    languages:
+      - language: default          # fallback voice
+        voice: elevenlabs.rachel
+      - language: es
+        voice: elevenlabs.maria
+      - language: fr
+        voice: gcloud.fr-FR-Neural2-B
+```
+
+Note the `language: default` entry — that is the fallback, not a language code.
+
+**Top-level keys:**
+
+| Key | Type | Default |
+|-----|------|---------|
+| `languages` | object[] | required |
+| `allowed` | string[] | — (restricts which languages may be switched to) |
+| `engine` | string | `deepgram` |
+| `model` | string | `nova-3` |
+| `provider` | string | — |
+| `start_language` | string | `en` |
+| `min_switch_words` | integer | `2` |
+| `fillers` | string[] \| object | — |
+| `function_fillers` | string[] \| object | — |
+| `turn_fillers` | string[] \| object | — |
+
+`engine` and `model` here select the **recognizer**, not the TTS voice — TTS is per-language inside `languages[]`.
+
+**Inside `languages[]`:**
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `language` | string, required | Language code, or `default` for the fallback |
+| `voice` | string | TTS voice spec |
+| `model` | string | TTS model |
+| `engine` | string | **Deprecated** — put the engine in the `voice` spec instead (`elevenlabs.maria`) |
+| `params` | object | Per-voice tuning, e.g. ElevenLabs `stability` and `similarity` |
+
+```json
+{ "ai": { "multilingual": {
+  "min_switch_words": 1,
+  "languages": [
+    {"language": "default", "voice": "elevenlabs.josh", "params": {"stability": 0.6, "similarity": 0.8}},
+    {"language": "es", "voice": "elevenlabs.maria", "params": {"stability": 0.4, "similarity": 0.9}}
+  ]
+}}}
+```
+
+`min_switch_words` is the hysteresis knob: how many words in the new language before the agent commits to switching. Lower it for snappier switching, raise it if the agent flips language on a stray loanword.
 
 ## SWAIG (SignalWire AI Gateway)
 
@@ -245,11 +373,11 @@ Based on the HolyGuacamole example using the Python SDK:
 ```python
 #!/usr/bin/env -S uv run
 # /// script
-# dependencies = ["signalwire-agents"]
+# dependencies = ["signalwire-sdk"]
 # ///
 
-from signalwire_agents import AgentBase
-from signalwire_agents.core.function_result import SwaigFunctionResult
+from signalwire import AgentBase
+from signalwire import FunctionResult
 
 class DriveThruAgent(AgentBase):
     def __init__(self):
@@ -296,7 +424,7 @@ Process:
         customizations = args.get("customizations")
 
         if item_name not in self.menu:
-            return SwaigFunctionResult(f"Sorry, we don't have {item_name}. Would you like something else?")
+            return FunctionResult(f"Sorry, we don't have {item_name}. Would you like something else?")
 
         price = self.menu[item_name]
         self.order.append({
@@ -308,7 +436,7 @@ Process:
 
         total = sum(item['price'] * item['quantity'] for item in self.order)
 
-        return SwaigFunctionResult(f"Added {quantity} {item_name}. Anything else? Your current total is ${total:.2f}")
+        return FunctionResult(f"Added {quantity} {item_name}. Anything else? Your current total is ${total:.2f}")
 
     @AgentBase.tool(
         name="confirm_order",
@@ -318,7 +446,7 @@ Process:
     def confirm_order(self, args, raw_data):
         """Confirm and finalize the order"""
         if not self.order:
-            return SwaigFunctionResult("You haven't ordered anything yet. What would you like?")
+            return FunctionResult("You haven't ordered anything yet. What would you like?")
 
         items = ", ".join([
             f"{item['quantity']} {item['item']}"
@@ -327,7 +455,7 @@ Process:
 
         total = sum(item['price'] * item['quantity'] for item in self.order)
 
-        return SwaigFunctionResult(f"Your order: {items}. Total: ${total:.2f}. Please pull forward to the window. Thank you!")
+        return FunctionResult(f"Your order: {items}. Total: ${total:.2f}. Please pull forward to the window. Thank you!")
 
 if __name__ == "__main__":
     agent = DriveThruAgent()
@@ -335,6 +463,28 @@ if __name__ == "__main__":
 ```
 
 **To learn more about building SDK-based agents, see: [AI Agent SDK Basics](ai-agent-sdk-basics.md)**
+
+## AI Billing & Metering
+
+Rates change, so don't quote prices from memory. Get current AI agent pricing from https://signalwire.com/pricing#ai-agents when a cost estimate is needed.
+
+How AI runtime is metered:
+
+- **AI runtime bills the entire time the AI is active on the call** — including while on `ai_hold`. Pausing speech processing does NOT pause the meter.
+- **Transfers stop the meter**: with an `execute_swml` function using `"transfer": true`, the AI leaves the call and AI billing stops as soon as the transfer completes.
+- **Post-prompt processing is never billed as AI runtime** — it always runs after the AI call ends and never extends AI billing.
+- **Each AI leg is metered independently** — two simultaneous AI legs run two meters.
+- **Usage rounds UP to the nearest minute** — a 2m20s AI session bills as 3 minutes. Voice legs (inbound and outbound) are billed individually the same way.
+- **The TTS voice affects cost** — different TTS voices can carry different charges, and some bill a separate Text to Speech line on top of AI runtime. Set the voice explicitly in `ai.languages` instead of relying on the platform default, which can change. Use the engine-prefixed form `voice: <engine>.<voice>` (optionally `<engine>.<voice>:<model>`). If the voice can't be resolved — a missing engine prefix or a mistyped name — the platform falls back to the default voice and the call continues, so a bad voice ID silently changes both the sound and the cost.
+
+### Cost Guardrails
+
+There are **no Space-level spend or duration alerts or caps** — set your own limits on every AI call:
+
+- **answer.max_duration**: Hard ceiling on the call (default 14400 seconds = 4 hours, which is also the **platform maximum** — 14400 is the largest accepted value); disconnects instantly when reached
+- **params.hard_stop_time**: Caps the AI session. Use `HH:MM:SS`, `MM:SS`, or a whole number of seconds (`"30:00"` and `"1800"` are both 30 minutes). Unit suffixes are not parsed: `30m` is read as 30 seconds. When the time passes, the AI gives one last reply using `hard_stop_prompt`, then the AI ends and the next SWML instruction runs, so it is not an instant cutoff and does not hang up by itself. Values beyond 4 hours are inert — the platform maximum ends the call first.
+
+Without these, a stuck AI call meters until the 4-hour platform limit ends it.
 
 ## Best Practices Quick Reference
 
@@ -370,7 +520,7 @@ if __name__ == "__main__":
 
 **User asks for specific API details:**
 - "What are all the parameters for AgentBase constructor?" → [AgentBase API](../reference/sdk/agent-base.md)
-- "What actions can SwaigFunctionResult return?" → [SwaigFunctionResult](../reference/sdk/function-result.md)
+- "What actions can FunctionResult return?" → [FunctionResult](../reference/sdk/function-result.md)
 - "How do I configure environment variables?" → [Environment Variables](../reference/deployment/environment-variables.md)
 
 **User needs advanced features not shown in examples:**
@@ -422,7 +572,7 @@ if __name__ == "__main__":
 
 **When user needs complete API reference:**
 - [AgentBase API](../reference/sdk/agent-base.md) for constructor/method details
-- [SwaigFunctionResult](../reference/sdk/function-result.md) for action catalog
+- [FunctionResult](../reference/sdk/function-result.md) for action catalog
 - [Skills System](../reference/sdk/skills-complete.md) for built-in skills reference
 
 **When looking for working code examples:**

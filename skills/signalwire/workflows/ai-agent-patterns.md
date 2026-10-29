@@ -2,6 +2,55 @@
 
 Frequently used patterns for SignalWire AI Agents.
 
+## Code Runs the Agent
+
+Four layers of control. Only the first one depends on the model cooperating:
+
+| Layer | Mechanism |
+|-------|-----------|
+| Guidance | Prompts and tool descriptions. Probabilistic. |
+| Tool scope | Each step lists its own tools. A tool that is not offered cannot be called. |
+| Transition scope | `set_valid_steps([])` and `set_valid_contexts([])`. The model has nowhere to go on its own. |
+| Execution authority | The handler checks real state, then commits. The model can ask. Code decides. |
+
+```python
+def scoped(step, text, tools):
+    """Task, tools, and no way for the model to leave on its own."""
+    return (step.set_text(text)
+            .set_functions(tools)          # [] means no tools
+            .set_valid_steps([])
+            .set_valid_contexts([]))
+```
+
+The only way out of a step is a handler that has checked state and then returns `swml_change_step()` or `swml_change_context()`.
+
+Keep truth in a system of record keyed by `call_id`. A confirm takes the revision number of the proposal the caller just heard: a repeat with that revision returns the same record, and a stale revision is refused. Tool handlers receive `(self, args, raw_data)`, and `self` is shared across calls, so writing per-call facts to it leaks one caller into the next call. Read per-call facts from `raw_data` or your store. Per-request agent configuration goes in an `add_per_call_config()` callback, which gets its own copy of the agent.
+
+`params.static_greeting` speaks a fixed disclosure, word for word, before the model says anything. Set `params.static_greeting_no_barge` when the caller must not talk over it. Do not leave a required disclosure to the prompt.
+
+`say()` is an action, so it finishes before the next action. Put it before `connect()` or `hangup()`. A transfer notice or goodbye left to the model's reply races the action and gets cut off.
+
+```python
+return (
+    FunctionResult(
+        tool_result="The call is being transferred.",
+        tool_prompt="Say nothing more; the notice is playing.",
+    )
+    .say("I'll connect you now.")
+    .connect(host_number, final=True)
+)
+```
+
+The same order ends a call: `say()` the goodbye, then `hangup()`.
+
+## Seams
+
+Every boundary in the call (recognition, the model, synthesis, a lookup, a handoff) adds latency and a place to fail. Three habits:
+
+- Prefetch lookups when the call arrives, before anyone is waiting on the answer.
+- Carry what the caller already said across a handoff, so they don't repeat it.
+- Write the failure behavior on purpose: say what happened and what the caller can do next. Otherwise a broken step is silence or a confident wrong answer.
+
 ## Data Lookup Pattern
 
 Look up information and respond conversationally:
@@ -25,14 +74,14 @@ def lookup_order(self, args, raw_data):
     order = self.db.get_order(order_num)
 
     if order:
-        return SwaigFunctionResult(
+        return FunctionResult(
             f"Order {order_num} was placed on {order['date']}. "
             f"Status: {order['status']}. "
             f"Expected delivery: {order['delivery_date']}. "
             "Is there anything else you'd like to know about this order?"
         )
     else:
-        return SwaigFunctionResult(
+        return FunctionResult(
             f"I couldn't find order {order_num}. "
             "Could you double-check the order number? "
             "It should start with ORD followed by numbers."
@@ -64,7 +113,7 @@ def cancel_order(self, args, raw_data):
     confirmed = args.get("confirmed", False)
 
     if not confirmed:
-        return SwaigFunctionResult(
+        return FunctionResult(
             f"Just to confirm - you want to cancel order {order_num}? "
             "This action cannot be undone. Please confirm."
         )
@@ -72,7 +121,7 @@ def cancel_order(self, args, raw_data):
     # Perform cancellation
     self.db.cancel_order(order_num)
 
-    return SwaigFunctionResult(
+    return FunctionResult(
         f"Order {order_num} has been cancelled. "
         "You'll receive a confirmation email shortly. "
         "Is there anything else I can help with?"
@@ -109,7 +158,7 @@ def transfer_to_agent(self, args, raw_data):
         "billing": "tel:+15551234567"
     }
 
-    return (SwaigFunctionResult(
+    return (FunctionResult(
         f"I'll transfer you to our {dept} team now. "
         "They'll have all the context from our conversation. "
         "Please hold while I connect you."
@@ -149,7 +198,7 @@ class SecureAgent(AgentBase):
         caller = raw_data.get("call", {}).get("from")
 
         if self.validate_pin(caller, pin):
-            return (SwaigFunctionResult(
+            return (FunctionResult(
                 "Identity verified. How can I help you today?"
             )
             .add_action("set_global_data", {"verified": True})
@@ -157,7 +206,7 @@ class SecureAgent(AgentBase):
                 "active": ["get_balance", "transfer_funds", "recent_transactions"]
             }))
         else:
-            return SwaigFunctionResult(
+            return FunctionResult(
                 "That PIN doesn't match our records. Please try again."
             )
 
@@ -169,7 +218,7 @@ class SecureAgent(AgentBase):
     def get_balance(self, args, raw_data):
         verified = raw_data.get("vars", {}).get("verified", False)
         if not verified:
-            return SwaigFunctionResult(
+            return FunctionResult(
                 "I need to verify your identity first. "
                 "What's your 4-digit PIN?"
             )
@@ -187,7 +236,7 @@ End calls politely with post_process:
     parameters={}
 )
 def end_call(self, args, raw_data):
-    return SwaigFunctionResult(
+    return FunctionResult(
         "Thank you for calling! Have a wonderful day. Goodbye!",
         post_process=True  # AI finishes speaking before hangup
     ).add_action("hangup", {})
@@ -209,7 +258,7 @@ def process_request(self, args, raw_data):
     request_type = args.get("request_type")
 
     # Start hold music
-    result = SwaigFunctionResult(
+    result = FunctionResult(
         "This will take a moment. Please hold while I process that."
     )
     result.add_action("playback_bg", {
@@ -247,7 +296,7 @@ def book_appointment(self, args, raw_data):
     # Book the appointment
     confirmation = self.calendar.book(date, time)
 
-    return (SwaigFunctionResult(
+    return (FunctionResult(
         f"Your appointment is confirmed for {date} at {time}. "
         "I'll send you a text message with the details."
     )
@@ -269,7 +318,7 @@ Guide user through a process:
     parameters={}
 )
 def start_signup(self, args, raw_data):
-    return (SwaigFunctionResult(
+    return (FunctionResult(
         "Great, let's get you signed up! First, what's your email address?"
     )
     .add_action("set_global_data", {"signup_step": "email"}))
@@ -283,7 +332,7 @@ def start_signup(self, args, raw_data):
 )
 def collect_email(self, args, raw_data):
     email = args.get("email")
-    return (SwaigFunctionResult(
+    return (FunctionResult(
         f"Got it, {email}. Now, what would you like your username to be?"
     )
     .add_action("set_global_data", {
@@ -305,12 +354,12 @@ def collect_username(self, args, raw_data):
     # Check availability and create account
     if self.is_username_available(username):
         self.create_account(email, username)
-        return SwaigFunctionResult(
+        return FunctionResult(
             f"Your account is all set up! Your username is {username}. "
             "You'll receive a confirmation email shortly."
         )
     else:
-        return SwaigFunctionResult(
+        return FunctionResult(
             f"Sorry, {username} is already taken. "
             "Can you try a different username?"
         )
@@ -369,7 +418,7 @@ Handle unrecognized requests gracefully:
 def handle_unknown(self, args, raw_data):
     request = args.get("request_summary", "your request")
 
-    return SwaigFunctionResult(
+    return FunctionResult(
         f"I'm not able to help with {request} directly, "
         "but I can connect you with someone who can. "
         "Would you like me to transfer you to a specialist?"
@@ -397,7 +446,7 @@ class RateLimitedAgent(AgentBase):
         # Track calls per conversation
         count = self._call_counts.get(call_id, 0)
         if count >= 3:
-            return SwaigFunctionResult(
+            return FunctionResult(
                 "I've already performed this operation several times. "
                 "To avoid delays, let me transfer you to an agent "
                 "who can help further."
@@ -407,7 +456,7 @@ class RateLimitedAgent(AgentBase):
 
         # Do the expensive thing
         result = self.do_expensive_thing()
-        return SwaigFunctionResult(result)
+        return FunctionResult(result)
 ```
 
 ## Appointment Scheduling Pattern
@@ -428,13 +477,13 @@ def check_availability(self, args, raw_data):
 
     if not slots:
         alternatives = self.calendar.get_next_available()
-        return SwaigFunctionResult(
+        return FunctionResult(
             f"Sorry, we don't have availability on {date}. "
             f"The next available slots are: {', '.join(alternatives)}. "
             "Would any of those work for you?"
         )
 
-    return (SwaigFunctionResult(
+    return (FunctionResult(
         f"We have the following times available on {date}: "
         f"{', '.join(slots)}. Which time works best for you?"
     )
@@ -454,7 +503,7 @@ def book_slot(self, args, raw_data):
 
     confirmation = self.calendar.book(date, time, caller)
 
-    return (SwaigFunctionResult(
+    return (FunctionResult(
         f"You're all set for {date} at {time}. "
         f"Your confirmation number is {confirmation}. "
         "I'll send you a text with the details."
