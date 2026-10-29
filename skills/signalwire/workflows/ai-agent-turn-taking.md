@@ -122,7 +122,7 @@ The pause the caller hears is the sum of what is still on the path: audio transp
 
 Tool turns are the ones that feel slow, because the agent goes quiet while the tool runs. Speech fillers on the tool play immediately and cut that perceived wait. They do not make the tool faster.
 
-Turn settings belong in code, and they change by step. `end_of_speech_timeout` is how much silence closes a turn. `barge_min_words` is how many words count as an interruption. A step that collects an account number waits longer than a step that confirms yes. Set the defaults with `set_params`, vary them per step, and change them mid-call from a handler. A prompt cannot hold the floor open: the turn boundary is decided before the model sees text.
+Turn settings belong in code. `end_of_speech_timeout` is how much silence closes a turn. `barge_min_words` is how many words count as an interruption. Set them with `set_params`. They apply to the whole call (steps have no params of their own), so choose values that fit the step that needs the most patience: collecting an account number needs more silence than confirming yes. A prompt cannot hold the floor open: the turn boundary is decided before the model sees text.
 
 [latency_checker](https://github.com/signalwire/latency_checker) measures a recording from the end of the caller's speech to the agent's first audio, on any platform.
 

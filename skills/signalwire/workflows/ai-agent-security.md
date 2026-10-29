@@ -336,15 +336,18 @@ def send_confirmation(self, args, raw_data):
 
 ### Collect Cards Outside the Model
 
-The model decides it is time to pay. It never hears the card. Tell the prompt not to ask for card details, and to stop a caller who starts reading a number out loud and send them to the keypad. Your pricing handler computes the amount and stores it with `set_meta_data`. The payment function reads that amount. It does not take `card_number` or `amount` from the model.
+The model decides it is time to pay. It never hears the card. Tell the prompt not to ask for card details, and to stop a caller who starts reading a number out loud and send them to the keypad. Your pricing handler computes the amount and stores it with `FunctionResult.set_metadata()`. The payment function reads that amount from `raw_data["meta_data"]`. It does not take `card_number` or `amount` from the model.
 
-`post_process=True` speaks the handoff line first. `execute_swml` then runs `pay`, and the following `set` writes `ai_response`. SWML fills `${pay_result}` when that `set` runs, so `pay` has to come first. Running SWML from a function is allowed by default; if `swaig_allow_swml` is off, the `pay` step is skipped.
+Metadata is scoped to a function's `meta_data_token`, so give the pricing and payment functions the same token; otherwise the payment function sees an empty `meta_data`.
+
+`post_process=True` speaks the handoff line first. `.pay()` then runs SWML `pay`. When it finishes, the agent reads `ai_response`, fills in `${pay_result}`, and replies. Running SWML from a function is allowed by default; if `swaig_allow_swml` is off, the `pay` step is skipped.
 
 ```python
 @AgentBase.tool(
     name="collect_payment",
     description="Hand the call to keypad card entry. Do not collect card numbers.",
-    parameters={}
+    parameters={},
+    meta_data_token="order",
 )
 def collect_payment(self, args, raw_data):
     meta = raw_data.get("meta_data") or {}
@@ -355,36 +358,28 @@ def collect_payment(self, args, raw_data):
     return FunctionResult(
         "You'll enter your card details using your phone's keypad.",
         post_process=True,
-    ).execute_swml({
-        "version": "1.0.0",
-        "sections": {
-            "main": [
-                {"pay": {
-                    "payment_connector_url": "https://payments.example.com/connector",
-                    "input": "dtmf",
-                    "payment_method": "credit-card",
-                    "charge_amount": f"{float(total):.2f}",
-                    "currency": "usd",
-                    "description": f"Order {meta.get('order_id')}",
-                    "max_attempts": 2,
-                    "security_code": True,
-                    "postal_code": True,
-                    "token_type": "one-time",
-                }},
-                {"set": {
-                    "ai_response": (
-                        "The payment status is ${pay_result}. "
-                        "If it is success, confirm the order and give a delivery estimate. "
-                        "If not, apologize and offer to try again or pay another way. "
-                        "Do not discuss card details."
-                    )
-                }},
-            ]
-        },
-    })
+    ).pay(
+        payment_connector_url="https://payments.example.com/connector",
+        charge_amount=f"{float(total):.2f}",
+        description=f"Order {meta.get('order_id')}",
+        max_attempts=2,
+        security_code=True,
+        postal_code=True,
+        token_type="one-time",
+        ai_response=(
+            "The payment status is ${pay_result}. "
+            "If it is success, confirm the order and give a delivery estimate. "
+            "If not, apologize and offer to try again or pay another way. "
+            "Do not discuss card details."
+        ),
+    )
 ```
 
+If you write the SWML `pay` by hand instead, `security_code` and `postal_code` must be strings (`"true"`); JSON booleans are rejected.
+
 Never put `${pay_payment_results}` in `ai_response`, a post-call summary, or a later function. The card number and CVV are masked there. The expiry and postal code are not, and the object stays on the call until it ends. `${pay_result}` is the status, which is all the model needs.
+
+The same goes for your own logs: never log card numbers, CVVs, or other sensitive caller data. Mask anything you must record.
 
 ### Secure Global Data
 

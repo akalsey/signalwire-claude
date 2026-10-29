@@ -4,7 +4,7 @@ Frequently used patterns for SignalWire AI Agents.
 
 ## Code Runs the Agent
 
-SignalWire calls this System-Directed AI. Four layers. Only the first one depends on the model cooperating:
+Four layers of control. Only the first one depends on the model cooperating:
 
 | Layer | Mechanism |
 |-------|-----------|
@@ -22,9 +22,9 @@ def scoped(step, text, tools):
             .set_valid_contexts([]))
 ```
 
-The only way out of a step is a handler that has checked state and then changes the step.
+The only way out of a step is a handler that has checked state and then returns `swml_change_step()` or `swml_change_context()`.
 
-Keep truth in a system of record keyed by `call_id`. A confirm takes the revision number of the proposal the caller just heard: a repeat with that revision returns the same record, and a stale revision is refused. Per-call facts belong on the per-request agent the SDK passes into the tool callback. Writing them to `self` leaks one caller into the next call.
+Keep truth in a system of record keyed by `call_id`. A confirm takes the revision number of the proposal the caller just heard: a repeat with that revision returns the same record, and a stale revision is refused. Tool handlers receive `(self, args, raw_data)`, and `self` is shared across calls, so writing per-call facts to it leaks one caller into the next call. Read per-call facts from `raw_data` or your store. Per-request agent configuration goes in an `add_per_call_config()` callback, which gets its own copy of the agent.
 
 `params.static_greeting` speaks a fixed disclosure, word for word, before the model says anything. Set `params.static_greeting_no_barge` when the caller must not talk over it. Do not leave a required disclosure to the prompt.
 
@@ -45,7 +45,11 @@ The same order ends a call: `say()` the goodbye, then `hangup()`.
 
 ## Seams
 
-Every boundary in the call — transport, recognition, the model, synthesis, a lookup, a handoff to a person — costs latency, coherence, or ownership of the failure. You can move a seam. You cannot delete it. Stuffing the rules into one prompt buries those boundaries where nothing can grab them. Prefetch a lookup when the call arrives, before anyone is waiting on the answer. Carry what the caller already said across a handoff, or they will say it again. A seam that breaks already has a behavior; if you did not write it, it is silence or a confident wrong answer. Write the failure on purpose: say what happened, and what the caller can do next.
+Every boundary in the call (recognition, the model, synthesis, a lookup, a handoff) adds latency and a place to fail. Three habits:
+
+- Prefetch lookups when the call arrives, before anyone is waiting on the answer.
+- Carry what the caller already said across a handoff, so they don't repeat it.
+- Write the failure behavior on purpose: say what happened and what the caller can do next. Otherwise a broken step is silence or a confident wrong answer.
 
 ## Data Lookup Pattern
 
