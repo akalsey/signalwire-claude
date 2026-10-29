@@ -908,6 +908,41 @@ functions:
 
 The agent can morph from one role to another without ending the session, reducing call legs and costs.
 
+## Semantic gates
+
+A semantic gate is a yes/no question checked before a SWAIG function runs. A function has 1–8 gates; all are checked at once. If any fails, the function does not run and the agent gets that gate's `on_fail` (the first failing gate in the list). A check that times out, or whose arguments are missing or not valid JSON, also blocks the function.
+
+Docs: https://signalwire.com/docs/platform/ai/semantic-gates and https://signalwire.com/docs/swml/reference/calling/ai/swaig/functions/gates
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `question` | yes | Yes/no, at most 8 KB. Name the input in backticks: `` `conversation` ``, `` `semantic_state` ``, `` `proposed_function` ``, `` `visual_input` ``. Ask one thing per question |
+| `threshold` | yes | Above 0 and at most 1. Use `0.9` or higher for an action that is hard to undo |
+| `on_fail` | yes | What the agent gets instead of the function result |
+| `id` | no | 1–64 letters, digits, or underscores, unique on the function |
+| `criteria` | no | `true` and/or `false` strings for near misses |
+| `visual_input` | no | Frames to show the gate: `true` is 1, or 0–5. No frame means the gate fails |
+
+`gate_fillers` are phrases played during the check. `fillers_at_gates` defaults to on and also plays the function's fillers while the check runs; set it `false` when those fillers announce the action itself.
+
+Call-wide `ai.params`: `semantic_gates_enabled` (default `true`; `false` skips checks), `semantic_gate_timeout_ms` (default `2500`, range 500–10000), `semantic_gate_history` (default `20`, range 0–100).
+
+Python and TypeScript Server SDKs expose `SemanticGate` starting with v3.6.0. Record a fact the gate should trust with `.set_semantic_state()` — it is read as `global_data.semantic_state`. The Python SDK accepts `visual_input` on a gate from 3.7.1; the TypeScript SDK does not yet, so define video gates in SWML.
+
+```yaml
+gates:
+  - id: explicit_request
+    question: Has the caller explicitly asked to cancel their ride in `conversation`?
+    criteria:
+      "true": The caller says they want to cancel the ride.
+      "false": The caller asked about cancelling, or said something else.
+    threshold: 0.95
+    on_fail:
+      response:
+        tool_result: cancel_ride was not run.
+        tool_prompt: Ask the caller whether they want to cancel the ride.
+```
+
 ## Next Steps
 
 - [AI Agent SDK Basics](ai-agent-sdk-basics.md) - Python SDK fundamentals
