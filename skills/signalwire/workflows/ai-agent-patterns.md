@@ -2,6 +2,51 @@
 
 Frequently used patterns for SignalWire AI Agents.
 
+## Code Runs the Agent
+
+SignalWire calls this System-Directed AI. Four layers. Only the first one depends on the model cooperating:
+
+| Layer | Mechanism |
+|-------|-----------|
+| Guidance | Prompts and tool descriptions. Probabilistic. |
+| Tool scope | Each step lists its own tools. A tool that is not offered cannot be called. |
+| Transition scope | `set_valid_steps([])` and `set_valid_contexts([])`. The model has nowhere to go on its own. |
+| Execution authority | The handler checks real state, then commits. The model can ask. Code decides. |
+
+```python
+def scoped(step, text, tools):
+    """Task, tools, and no way for the model to leave on its own."""
+    return (step.set_text(text)
+            .set_functions(tools)          # [] means no tools
+            .set_valid_steps([])
+            .set_valid_contexts([]))
+```
+
+The only way out of a step is a handler that has checked state and then changes the step.
+
+Keep truth in a system of record keyed by `call_id`. A confirm takes the revision number of the proposal the caller just heard: a repeat with that revision returns the same record, and a stale revision is refused. Per-call facts belong on the per-request agent the SDK passes into the tool callback. Writing them to `self` leaks one caller into the next call.
+
+`params.static_greeting` speaks a fixed disclosure, word for word, before the model says anything. Set `params.static_greeting_no_barge` when the caller must not talk over it. Do not leave a required disclosure to the prompt.
+
+`say()` is an action, so it finishes before the next action. Put it before `connect()` or `hangup()`. A transfer notice or goodbye left to the model's reply races the action and gets cut off.
+
+```python
+return (
+    FunctionResult(
+        tool_result="The call is being transferred.",
+        tool_prompt="Say nothing more; the notice is playing.",
+    )
+    .say("I'll connect you now.")
+    .connect(host_number, final=True)
+)
+```
+
+The same order ends a call: `say()` the goodbye, then `hangup()`.
+
+## Seams
+
+Every boundary in the call — transport, recognition, the model, synthesis, a lookup, a handoff to a person — costs latency, coherence, or ownership of the failure. You can move a seam. You cannot delete it. Stuffing the rules into one prompt buries those boundaries where nothing can grab them. Prefetch a lookup when the call arrives, before anyone is waiting on the answer. Carry what the caller already said across a handoff, or they will say it again. A seam that breaks already has a behavior; if you did not write it, it is silence or a confident wrong answer. Write the failure on purpose: say what happened, and what the caller can do next.
+
 ## Data Lookup Pattern
 
 Look up information and respond conversationally:

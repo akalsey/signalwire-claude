@@ -334,38 +334,63 @@ def send_confirmation(self, args, raw_data):
 
 ## Data Protection
 
-### Never Log Sensitive Data
+### Collect Cards Outside the Model
+
+The model decides it is time to pay. It never hears the card. Tell the prompt not to ask for card details, and to stop a caller who starts reading a number out loud and send them to the keypad. Your pricing handler computes the amount and stores it with `set_meta_data`. The payment function reads that amount. It does not take `card_number` or `amount` from the model.
+
+`post_process=True` speaks the handoff line first. `execute_swml` then runs `pay`, and the following `set` writes `ai_response`. SWML fills `${pay_result}` when that `set` runs, so `pay` has to come first. Running SWML from a function is allowed by default; if `swaig_allow_swml` is off, the `pay` step is skipped.
 
 ```python
-import logging
-
-logger = logging.getLogger(__name__)
-
 @AgentBase.tool(
-    name="process_payment",
-    description="Process a payment",
-    parameters={
-        "card_number": {"type": "string", "description": "Card number"},
-        "amount": {"type": "number", "description": "Amount"}
-    }
+    name="collect_payment",
+    description="Hand the call to keypad card entry. Do not collect card numbers.",
+    parameters={}
 )
-def process_payment(self, args, raw_data):
-    card_number = args.get("card_number")
-    amount = args.get("amount")
+def collect_payment(self, args, raw_data):
+    meta = raw_data.get("meta_data") or {}
+    total = meta.get("order_total")
+    if total is None:
+        return FunctionResult("Let's finish the order before we take payment.")
 
-    # WRONG - logs sensitive data
-    # logger.info(f"Processing payment: card={card_number}, amount={amount}")
-
-    # CORRECT - mask sensitive data
-    masked_card = f"****{card_number[-4:]}" if card_number else "unknown"
-    logger.info(f"Processing payment: card={masked_card}, amount={amount}")
-
-    # Process payment...
+    return FunctionResult(
+        "You'll enter your card details using your phone's keypad.",
+        post_process=True,
+    ).execute_swml({
+        "version": "1.0.0",
+        "sections": {
+            "main": [
+                {"pay": {
+                    "payment_connector_url": "https://payments.example.com/connector",
+                    "input": "dtmf",
+                    "payment_method": "credit-card",
+                    "charge_amount": f"{float(total):.2f}",
+                    "currency": "usd",
+                    "description": f"Order {meta.get('order_id')}",
+                    "max_attempts": 2,
+                    "security_code": True,
+                    "postal_code": True,
+                    "token_type": "one-time",
+                }},
+                {"set": {
+                    "ai_response": (
+                        "The payment status is ${pay_result}. "
+                        "If it is success, confirm the order and give a delivery estimate. "
+                        "If not, apologize and offer to try again or pay another way. "
+                        "Do not discuss card details."
+                    )
+                }},
+            ]
+        },
+    })
 ```
+
+Never put `${pay_payment_results}` in `ai_response`, a post-call summary, or a later function. The card number and CVV are masked there. The expiry and postal code are not, and the object stays on the call until it ends. `${pay_result}` is the status, which is all the model needs.
 
 ### Secure Global Data
 
-Don't store sensitive info in global_data (it's visible in logs):
+Don't store sensitive info in global_data (it's visible in logs).
+
+Two tools in one turn start from the same `global_data` snapshot, taken at the start of the turn. The second write can overwrite the first. Keep anything both tools might update in your own store, keyed by `call_id`.
 
 ```python
 # WRONG - sensitive data in global_data
@@ -514,4 +539,5 @@ def transfer(self, args, raw_data):
 - [ ] **Transfers**: Only allowed destinations
 - [ ] **HTTPS**: Production uses SSL/TLS
 - [ ] **Secure Functions**: Destructive operations marked secure
-- [ ] **Data Protection**: Minimal data in global_data
+- [ ] **Data Protection**: Minimal data in global_data. Two tools in one turn can overwrite each other's writes
+- [ ] **Cards**: Collected with `pay` on the keypad. The model receives `${pay_result}` only
